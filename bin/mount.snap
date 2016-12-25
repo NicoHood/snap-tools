@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# Stop on errors
+set -e -u -o pipefail
+
+# Check input parameters
+if [[ "$#" -ne 2 || "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "Usage: $(basename "$0") <device> <mountpoint>" 1>&2
+    exit 1
+fi
+
+# Check for root user
+if [[ ${EUID} -ne 0 ]]; then
+  echo "Error: You must be a root user" 2>&1
+  exit 1
+fi
+
+# Params
+BTRFS_BLOCKDEVICE=$1
+MOUNT=$2
+
+# Mount snapper tracked root subvolume to /
+mount -o subvol=subvolumes/root ${BTRFS_BLOCKDEVICE} ${MOUNT}
+mkdir -p ${MOUNT}/.snapshots
+mount -o subvol=snapshots/root ${BTRFS_BLOCKDEVICE} ${MOUNT}/.snapshots
+
+# Mount btrfs real root directory to /.btrfs
+mkdir -p ${MOUNT}/.btrfs
+mount ${BTRFS_BLOCKDEVICE} ${MOUNT}/.btrfs
+
+# Create top level mount points and mount subvolumes and their snapshot subvolumes
+CONFIGS=($(find "${MOUNT}/.btrfs/snapshots" -mindepth 1 -maxdepth 1 -type d -printf "%f\n"))
+for subvol in "${CONFIGS[@]}"; do
+    [ "${subvol}" == "root" ] && continue
+    mkdir -p ${MOUNT}/${subvol}
+    mount -o subvol=subvolumes/${subvol} ${BTRFS_BLOCKDEVICE} ${MOUNT}/${subvol}
+    mkdir -p ${MOUNT}/${subvol}/.snapshots
+    mount -o subvol=snapshots/${subvol} ${BTRFS_BLOCKDEVICE} ${MOUNT}/${subvol}/.snapshots
+done
+
+# Mount subvolumes which should get excluded from snapper backups
+mkdir -p ${MOUNT}/var/cache/pacman/pkg
+mkdir -p ${MOUNT}/var/abs
+mkdir -p ${MOUNT}/var/tmp
+mkdir -p ${MOUNT}/var/log
+mkdir -p ${MOUNT}/srv
+mount -o subvol=excludes/pkg ${BTRFS_BLOCKDEVICE} ${MOUNT}/var/cache/pacman/pkg
+mount -o subvol=excludes/abs ${BTRFS_BLOCKDEVICE} ${MOUNT}/var/abs
+mount -o subvol=excludes/tmp ${BTRFS_BLOCKDEVICE} ${MOUNT}/var/tmp
+mount -o subvol=excludes/log ${BTRFS_BLOCKDEVICE} ${MOUNT}/var/log
+mount -o subvol=excludes/srv ${BTRFS_BLOCKDEVICE} ${MOUNT}/srv

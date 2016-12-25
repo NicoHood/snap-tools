@@ -1,0 +1,69 @@
+#!/bin/bash
+
+# Stop on errors
+set -e -u -o pipefail
+
+# Check input parameters
+if [[ "$#" -lt 1 || "$1" == "--help" || "$1" == "-h" ]]; then
+    echo "Usage: $(basename "$0") <device> [<subvolume>...]" 1>&2
+    exit 1
+fi
+
+# Check for root user
+if [[ ${EUID} -ne 0 ]]; then
+  echo "Error: You must be a root user" 2>&1
+  exit 1
+fi
+
+# Check input param count
+if [ "$#" -eq 1 ]; then
+    read -rp "Warning: No extra subvolume specified. Do you really want to continue [Y/n]?" yesno
+    if [[ "${yesno}" != [Yy]"es" && "${yesno}" != [Yy] && -n "${yesno}" ]]; then
+        echo "Aborted by user"
+        exit 0
+    fi
+fi
+
+# Params
+BLOCKDEVICE=$1
+shift
+
+# Partition disk:
+# GPT
+# +1M bios boot partition
+# +512M EFI /boot/efi partition
+# +512M /boot partition
+# 100% luks root / partition
+wipefs -a ${BLOCKDEVICE}
+echo "Formating disk..."
+echo -e "g\nn\n\n\n+1M\nt\n4\nn\n\n\n+512M\nt\n\n1\nn\n\n\n+512M\nn\n\n\n\np\nw\n" | fdisk ${BLOCKDEVICE}
+echo ""
+
+# I had to wipe sda1 as it was recognized as btrfs for some reasons
+# Afterwards os-prober will give some infos about not existing filesystems but thats okay
+wipefs -a ${BLOCKDEVICE}1
+wipefs -a ${BLOCKDEVICE}2
+wipefs -a ${BLOCKDEVICE}3
+wipefs -a ${BLOCKDEVICE}4
+
+# Create cryptodisks
+echo "Warning: For more security overwrite the disk with random bytes first."
+echo "Creating boot luks container"
+cryptsetup luksFormat -c aes-xts-plain64 -s 512 -h sha512 --use-random ${BLOCKDEVICE}3
+echo "Creating root luks container"
+cryptsetup luksFormat -c aes-xts-plain64 -s 512 -h sha512 --use-random ${BLOCKDEVICE}4
+
+# Open cryptodisks
+LUKS_EXT4=$(blkid ${BLOCKDEVICE}3 -o value -s UUID)
+LUKS_BTRFS=$(blkid ${BLOCKDEVICE}4 -o value -s UUID)
+cryptsetup luksOpen ${BLOCKDEVICE}3 ${LUKS_EXT4}
+cryptsetup luksOpen ${BLOCKDEVICE}4 ${LUKS_BTRFS}
+
+# Format disks
+mkfs.fat -F32 ${BLOCKDEVICE}2
+mkfs.ext4 /dev/mapper/${LUKS_EXT4}
+mkfs.snap /dev/mapper/${LUKS_BTRFS} root "$@"
+
+# Close cryptodisks
+cryptsetup luksClose /dev/mapper/${LUKS_EXT4}
+cryptsetup luksClose /dev/mapper/${LUKS_BTRFS}
