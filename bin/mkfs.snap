@@ -62,6 +62,7 @@ done
 # Create subvolumes untracked by snapper
 btrfs subvolume create ${MOUNT}/excludes/pkg
 btrfs subvolume create ${MOUNT}/excludes/abs
+# TODO 1777 permission in package
 btrfs subvolume create ${MOUNT}/excludes/tmp
 btrfs subvolume create ${MOUNT}/excludes/log
 btrfs subvolume create ${MOUNT}/excludes/srv

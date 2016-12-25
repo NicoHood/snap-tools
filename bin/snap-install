@@ -1,0 +1,229 @@
+#!/bin/bash
+
+# Stop on errors
+set -e -u -o pipefail
+
+# Avoid any encoding problems
+export LANG=C
+
+# check if messages are to be printed using color
+unset ALL_OFF BOLD BLUE GREEN RED YELLOW
+if [[ -t 2 ]]; then
+	# prefer terminal safe colored and bold text when tput is supported
+	if tput setaf 0 &>/dev/null; then
+		ALL_OFF="$(tput sgr0)"
+		BOLD="$(tput bold)"
+		BLUE="${BOLD}$(tput setaf 4)"
+		GREEN="${BOLD}$(tput setaf 2)"
+		RED="${BOLD}$(tput setaf 1)"
+		YELLOW="${BOLD}$(tput setaf 3)"
+	else
+		ALL_OFF="\e[1;0m"
+		BOLD="\e[1;1m"
+		BLUE="${BOLD}\e[1;34m"
+		GREEN="${BOLD}\e[1;32m"
+		RED="${BOLD}\e[1;31m"
+		YELLOW="${BOLD}\e[1;33m"
+	fi
+fi
+readonly ALL_OFF BOLD BLUE GREEN RED YELLOW
+
+plain() {
+	local mesg=$1; shift
+	printf "${BOLD}    ${mesg}${ALL_OFF}\n" "$@" >&2
+}
+
+msg() {
+	local mesg=$1; shift
+	printf "${GREEN}==>${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@" >&2
+}
+
+msg2() {
+	local mesg=$1; shift
+	printf "${BLUE}  ->${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@" >&2
+}
+
+warning() {
+	local mesg=$1; shift
+	printf "${YELLOW}==> WARNING:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@" >&2
+}
+
+error() {
+	local mesg=$1; shift
+	printf "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@" >&2
+}
+
+# Check for root user
+if [[ ${EUID} -ne 0 ]]; then
+  error "You must be a root user"
+  exit 1
+fi
+
+# Disclaimer/Warning
+msg "Pre-installation"
+warning "This script guides you through the installation of ArchLinux."
+plain "It orientates to the wiki page: https://wiki.archlinux.org/index.php/installation_guide"
+plain "Please read the script source to understand how ArchLinux works."
+plain "Use at your own risk. Continue? [Y/n]"
+read -r yesno
+if [[ "${yesno}" != [Yy]"es" && "${yesno}" != [Yy] && -n "${yesno}" ]]; then
+    plain "Aborted by user"
+    exit 0
+fi
+
+# Set keyboard temporary
+msg "Set the keyboard layout"
+# TODO make flexible ls /usr/share/kbd/keymaps/**/*.map.gz
+# TODO more flexible
+warning "Using keymap us by default. Please edit /etc/vconsole.conf for a different layout."
+loadkeys us
+
+# Boot CD in EFI mode
+msg "Verify the boot mode"
+if [[ ! -d /sys/firmware/efi/efivars ]]; then
+    warning "Not running in EFI mode. The system will not boot with EFI. Continue? [Y/n]"
+    read -r yesno
+    if [[ "${yesno}" != [Yy]"es" && "${yesno}" != [Yy] && -n "${yesno}" ]]; then
+        plain "Aborted by user"
+        exit 0
+    fi
+fi
+
+# Check for internet
+msg "Connect to the Internet"
+if ! ping archlinux.org -c 4; then
+    error "No network connection."
+    exit 1
+fi
+
+# Set time
+msg "Update the system clock"
+timedatectl set-ntp true
+
+# Partition disk
+msg "Partition the disks & Format the partitions"
+lsblk
+msg2 "Please type the disk where you want to install your system (example: /dev/sdX)."
+read -r CFG_SDX
+
+msg2 "Please enter the subvolumes you wish to create. Sample: home data vm hack"
+read -r subvolumes
+# TODO convert subvolumes into array to pass tp snap-part
+msg2 "Using snap-part to partition & format disk"
+snap-part ${CFG_SDX} home data vm hacks
+
+# Open cryptodisks
+msg "Mount the file systems"
+LUKS_EXT4=$(blkid ${CFG_SDX}3 -o value -s UUID)
+LUKS_BTRFS=$(blkid ${CFG_SDX}4 -o value -s UUID)
+msg2 "Opening /boot ext4 luks partition"
+cryptsetup luksOpen ${CFG_SDX}3 ${LUKS_EXT4}
+msg2 "Opening / btrfs luks partition"
+cryptsetup luksOpen ${CFG_SDX}4 ${LUKS_BTRFS}
+
+# Mount disks
+msg2 "Mounting partitons partitions"
+mount.snap /dev/mapper/${LUKS_BTRFS} /mnt
+mkdir -p /mnt/boot
+mount /dev/mapper/${LUKS_EXT4} /mnt/boot
+mkdir -p /mnt/boot/efi
+mount ${CFG_SDX}2 /mnt/boot/efi
+
+# Mirror selection
+msg "Installation"
+msg "Select the mirrors"
+warning "System mirrorlist will be used for new installation."
+plain "Please visit https://www.archlinux.org/mirrorlist/ and only use https + ipv4&6 only mirrors."
+plain "You can switch to a different tty now or later and edit the mirrorslist. Press enter to continue."
+read -s
+
+# Install basic system and chroot
+msg "Install the base packages"
+pacstrap /mnt base base-devel sudo bash-completion btrfs-progs linux-headers \
+              linux-lts linux-lts-headers grub os-prober efibootmgr intel-ucode
+
+msg "Configure the system"
+msg "Fstab"
+genfstab -U /mnt > /mnt/etc/fstab
+echo "cryptboot UUID=$(blkid ${CFG_SDX}3 -o value -s UUID) none luks" >> /mnt/etc/crypttab
+
+# Call some install functiosn in chroot environment
+msg "Chroot"
+
+# Set time zone
+msg "Time zone"
+ln -s /usr/share/zoneinfo/$(tzselect) /mnt/etc/localtime
+arch-chroot /mnt /bin/bash -c "hwclock --systohc --utc"
+
+# Set locale
+msg "Locale"
+# TODO more flexible
+warning "Using keymap us by default. Please edit /etc/vconsole.conf for a different layout."
+echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
+arch-chroot /mnt /bin/bash -c "locale-gen"
+echo 'LANG=en_US.UTF-8' > /etc/locale.conf
+echo 'KEYMAP=us' > /etc/vconsole.conf
+
+# Hostname
+msg "Hostname"
+msg2 "Please enter the hostname you want to use for your machine."
+read -r hostname
+echo ${hostname} > /etc/hostname
+
+# Network configuration
+msg "Network configuration"
+warning "(Wifi) Network configuration is not supported by this script."
+plain "Make sure to enable dhcpcd after the installation. Continue? [Y/n]"
+read -r yesno
+if [[ "${yesno}" != [Yy]"es" && "${yesno}" != [Yy] && -n "${yesno}" ]]; then
+    plain "Aborted by user"
+    exit 0
+fi
+
+# Mkinitcpio
+msg "Initramfs"
+# Add "keymap, encrypt" hooks and "/usr/bin/btrfs" to binaries
+# https://wiki.archlinux.org/index.php/Dm-crypt/Encrypting_an_entire_system#Configuring_mkinitcpio_5
+sed -i 's/^HOOKS=".*block/\0 keymap encrypt/g' /mnt/etc/mkinitcpio.conf
+sed -i "s#^BINARIES=\"#\0/usr/bin/btrfs#g" /mnt/etc/mkinitcpio.conf
+arch-chroot /mnt /bin/bash -c "mkinitcpio -P"
+
+# Add new admin user and disable root account
+msg "Root password"
+sed -i '/%wheel.ALL=(ALL) ALL/s/^# //g' /mnt/etc/sudoers
+msg2 "Please enter username of the user account 1000 (wheel/users)"
+read -r CFG_USERNAME
+arch-chroot /mnt /bin/bash -c "useradd -m -G wheel,users -s /bin/bash ${CFG_USERNAME,,}"
+arch-chroot /mnt /bin/bash -c "passwd ${CFG_USERNAME,,}"
+arch-chroot /mnt /bin/bash -c "chfn -f ${CFG_USERNAME} ${CFG_USERNAME,,}"
+passwd -l root
+
+# Install grub for efi and bios. Efi installation will only work if you booted with efi.
+sed -i "s#^GRUB_CMDLINE_LINUX=\"#\0cryptdevice=UUID=$(blkid ${CFG_SDX}4 -o value -s UUID):cryptroot#g" /mnt/etc/default/grub
+echo 'GRUB_ENABLE_CRYPTODISK=y' >> /mnt/etc/default/grub
+arch-chroot /mnt /bin/bash -c "grub-mkconfig -o /boot/grub/grub.cfg"
+arch-chroot /mnt /bin/bash -c "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=grub"
+arch-chroot /mnt /bin/bash -c "grub-install --target=i386-pc ${CFG_SDX}"
+
+# TODO
+# # Install DE for vm
+# pacman -S --needed -q linux-lts linux-lts-headers linux-headers \
+# 					  virtualbox-guest-utils virtualbox-guest-dkms \
+# 					  xorg-server mesa mesa-libgl xf86-input-libinput \
+# 					  lightdm-gtk-greeter
+
+msg "Reboot"
+msg2 "Installation successful. System still mounted at /mnt. Unmount and reboot now? [Y/n]"
+read -r yesno
+if [[ "${yesno}" != [Yy]"es" && "${yesno}" != [Yy] && -n "${yesno}" ]]; then
+    echo "Aborted by user"
+    exit 0
+fi
+
+msg2 "Unmounting filesystems"
+umount -R /mnt
+msg2 "Closing /boot ext4 luks partition"
+cryptsetup luksClose ${LUKS_EXT4}
+msg2 "Closing / btrfs luks partition"
+cryptsetup luksClose ${LUKS_BTRFS}
+reboot

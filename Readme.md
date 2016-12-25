@@ -15,7 +15,27 @@ The tools are written on and for ArchLinux only.
 
 ### snap-install
 
-TODO
+Installs a basic ArchLinux system with guided setup. Uses snap-part to partition
+the disk with a secure snapper btrfs compatible layout. Follows the schema of
+the wiki so you can customize the script easily and understand it.
+
+Packages:
+* base
+* base-devel
+* sudo bash-completion
+* btrfs-progs
+* linux-headers
+* linux-lts
+* linux-lts-headers
+* grub
+* os-prober
+* efibootmgr
+* intel-ucode
+
+After installation:
+* Enable dhcpcd/configure wifi
+* Install desktop environment
+* Update mirrorlist
 
 ### snap-part
 Partitions a disk with GPT, creates encrypted luks containers with ext4 + btrfs.
@@ -91,6 +111,8 @@ TODO
 ## TODO
 * shellcheck
 * AUR package
+* snap-mkfs and snap-mount alias
+* Makefile
 
 ## Links
 * [snapper](https://github.com/openSUSE/snapper)
